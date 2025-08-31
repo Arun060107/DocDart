@@ -1,0 +1,396 @@
+# docdart.py
+# Simple single-file Flask app prototype for "DocDart"
+# Features: user register/login (session), doctor listing, book appt, view my appts.
+# Note: for demo only. DO NOT use plaintext passwords or this DB design in production.
+
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+import sqlite3
+from datetime import datetime
+import os
+
+APP_SECRET = "replace_this_with_a_random_secret"
+DB_PATH = "docdart.db"
+
+app = Flask(__name__)
+app.secret_key = APP_SECRET
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    if os.path.exists(DB_PATH):
+        return
+    conn = get_db()
+    c = conn.cursor()
+    c.executescript("""
+    CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        name TEXT
+    );
+    CREATE TABLE doctors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        specialty TEXT,
+        location TEXT
+    );
+    CREATE TABLE appointments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        doctor_id INTEGER NOT NULL,
+        appt_datetime TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id),
+        FOREIGN KEY(doctor_id) REFERENCES doctors(id)
+    );
+    """)
+    # seed some doctors
+    doctors = [
+        ("Dr. Priya Sharma", "General Physician", "MG Road Clinic"),
+        ("Dr. Rahul Verma", "Cardiologist", "City Heart Center"),
+        ("Dr. Ananya Das", "Pediatrician", "Kids Care Clinic"),
+        ("Dr. Sameer Khan", "Dermatologist", "Skin & Co")
+    ]
+    c.executemany("INSERT INTO doctors (name, specialty, location) VALUES (?, ?, ?);", doctors)
+    conn.commit()
+    conn.close()
+
+# init DB on first run
+init_db()
+
+
+base_html = """
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>DocDart — {{title}}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Bootstrap CDN for quick UI -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+      <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">DocDart</a>
+        <div class="collapse navbar-collapse">
+          <ul class="navbar-nav ms-auto">
+            {% if session.get('user') %}
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('doctors') }}">Doctors</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('my_appointments') }}">My Appts</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">Logout ({{ session['user']['username'] }})</a></li>
+            {% else %}
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">Register</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
+            {% endif %}
+          </ul>
+        </div>
+      </div>
+    </nav>
+    <div class="container my-4">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="mb-3">
+            {% for m in messages %}
+              <div class="alert alert-info">{{ m }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+      {{ body }}
+    </div>
+  </body>
+</html>
+"""
+
+index_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="p-4 bg-white rounded shadow-sm">
+    <h1 class="h3">Welcome to DocDart ⚡</h1>
+    <p>Quickly find doctors and book appointments. Prototype version.</p>
+    <div class="row">
+      <div class="col-md-6">
+        <h5>How it works</h5>
+        <ol>
+          <li>Register / Login</li>
+          <li>Browse doctors</li>
+          <li>Pick date/time & book</li>
+        </ol>
+      </div>
+      <div class="col-md-6">
+        <h5>Get started</h5>
+        {% if session.get('user') %}
+          <a href="{{ url_for('doctors') }}" class="btn btn-primary">Browse Docs</a>
+          <a href="{{ url_for('my_appointments') }}" class="btn btn-outline-primary">My Appointments</a>
+        {% else %}
+          <a href="{{ url_for('register') }}" class="btn btn-success">Register</a>
+          <a href="{{ url_for('login') }}" class="btn btn-outline-success">Login</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endblock %}
+"""
+
+register_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="card p-4">
+    <h3>Create account</h3>
+    <form method="post">
+      <div class="mb-3">
+        <label>Full name</label>
+        <input name="name" class="form-control" required>
+      </div>
+      <div class="mb-3">
+        <label>Username</label>
+        <input name="username" class="form-control" required>
+      </div>
+      <div class="mb-3">
+        <label>Password</label>
+        <input name="password" type="password" class="form-control" required>
+      </div>
+      <button class="btn btn-primary">Register</button>
+      <a href="{{ url_for('login') }}" class="ms-2">Already have an account?</a>
+    </form>
+  </div>
+{% endblock %}
+"""
+
+login_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="card p-4">
+    <h3>Login</h3>
+    <form method="post">
+      <div class="mb-3">
+        <label>Username</label>
+        <input name="username" class="form-control" required>
+      </div>
+      <div class="mb-3">
+        <label>Password</label>
+        <input name="password" type="password" class="form-control" required>
+      </div>
+      <button class="btn btn-primary">Login</button>
+      <a href="{{ url_for('register') }}" class="ms-2">Create account</a>
+    </form>
+  </div>
+{% endblock %}
+"""
+
+doctors_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="card p-3">
+    <h3>Doctors</h3>
+    <div class="list-group">
+      {% for d in doctors %}
+        <div class="list-group-item d-flex justify-content-between align-items-start">
+          <div>
+            <strong>{{ d['name'] }}</strong><br>
+            <small>{{ d['specialty'] }} • {{ d['location'] }}</small>
+          </div>
+          <div class="text-end">
+            <a href="{{ url_for('book', doctor_id=d['id']) }}" class="btn btn-sm btn-primary">Book</a>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% endblock %}
+"""
+
+book_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="card p-3">
+    <h3>Book — {{ doctor['name'] }}</h3>
+    <form method="post">
+      <div class="mb-3">
+        <label>Date & Time</label>
+        <input name="datetime" type="datetime-local" class="form-control" required>
+      </div>
+      <div class="mb-3">
+        <label>Note (optional)</label>
+        <textarea name="note" class="form-control"></textarea>
+      </div>
+      <button class="btn btn-success">Confirm booking</button>
+      <a href="{{ url_for('doctors') }}" class="btn btn-link">Back</a>
+    </form>
+  </div>
+{% endblock %}
+"""
+
+my_appts_html = """
+{% extends "base" %}
+{% block body %}
+  <div class="card p-3">
+    <h3>My Appointments</h3>
+    {% if appts %}
+      <table class="table">
+        <thead><tr><th>Doctor</th><th>When</th><th>Note</th><th>Booked at</th></tr></thead>
+        <tbody>
+          {% for a in appts %}
+            <tr>
+              <td>{{ a['doc_name'] }} <br><small>{{ a['specialty'] }}</small></td>
+              <td>{{ a['appt_datetime'] }}</td>
+              <td>{{ a['note'] or '-' }}</td>
+              <td>{{ a['created_at'] }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>No appointments yet. Browse doctors to book one.</p>
+    {% endif %}
+  </div>
+{% endblock %}
+"""
+
+# register templates with Flask's template system via render_template_string
+templates = {
+    "base": base_html,
+    "index": index_html,
+    "register": register_html,
+    "login": login_html,
+    "doctors": doctors_html,
+    "book": book_html,
+    "my_appts": my_appts_html
+}
+
+def render(tname, **ctx):
+    # helper to render using our small template dict
+    # first render body template extending base
+    body = render_template_string(templates[tname], **ctx)
+    return render_template_string(templates["base"], body=body, title=ctx.get("title", ""), **ctx)
+
+
+def login_user_row(row):
+    session['user'] = {"id": row['id'], "username": row['username'], "name": row['name']}
+
+def current_user():
+    return session.get('user')
+
+
+@app.route("/")
+def index():
+    return render("index", title="Home")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form['username'].strip()
+        password = request.form['password'].strip()
+        name = request.form.get('name','').strip()
+        if not username or not password:
+            flash("Fill all fields")
+            return redirect(url_for('register'))
+        conn = get_db()
+        c = conn.cursor()
+        try:
+            c.execute("INSERT INTO users (username, password, name) VALUES (?, ?, ?);", (username, password, name))
+            conn.commit()
+            flash("Account created. Log in now.")
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash("Username taken.")
+            return redirect(url_for('register'))
+        finally:
+            conn.close()
+    return render("register", title="Register")
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form['username'].strip()
+        password = request.form['password'].strip()
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE username = ? AND password = ?;", (username, password))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            login_user_row(row)
+            flash("Logged in.")
+            return redirect(url_for('doctors'))
+        else:
+            flash("Invalid credentials.")
+            return redirect(url_for('login'))
+    return render("login", title="Login")
+
+@app.route("/logout")
+def logout():
+    session.pop('user', None)
+    flash("Logged out.")
+    return redirect(url_for('index'))
+
+@app.route("/doctors")
+def doctors():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM doctors ORDER BY name;")
+    docs = c.fetchall()
+    conn.close()
+    return render("doctors", doctors=docs, title="Doctors")
+
+@app.route("/book/<int:doctor_id>", methods=["GET", "POST"])
+def book(doctor_id):
+    if not current_user():
+        flash("Login to book.")
+        return redirect(url_for('login'))
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM doctors WHERE id = ?;", (doctor_id,))
+    doc = c.fetchone()
+    if not doc:
+        conn.close()
+        flash("Doctor not found.")
+        return redirect(url_for('doctors'))
+    if request.method == "POST":
+        dt = request.form['datetime']
+        note = request.form.get('note','').strip()
+        # basic validation
+        try:
+            # store as ISO string
+            dt_parsed = datetime.fromisoformat(dt)
+            dt_str = dt_parsed.isoformat(sep=' ')
+        except Exception:
+            flash("Invalid date/time format.")
+            conn.close()
+            return redirect(url_for('book', doctor_id=doctor_id))
+        c.execute("INSERT INTO appointments (user_id, doctor_id, appt_datetime, note) VALUES (?, ?, ?, ?);",
+                  (current_user()['id'], doctor_id, dt_str, note))
+        conn.commit()
+        conn.close()
+        flash("Appointment booked!")
+        return redirect(url_for('my_appointments'))
+    conn.close()
+    return render("book", doctor=doc, title=f"Book {doc['name']}")
+
+@app.route("/my_appointments")
+def my_appointments():
+    if not current_user():
+        flash("Login to view appointments.")
+        return redirect(url_for('login'))
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+      SELECT a.*, d.name as doc_name, d.specialty
+      FROM appointments a
+      JOIN doctors d ON d.id = a.doctor_id
+      WHERE a.user_id = ?
+      ORDER BY a.appt_datetime DESC
+    """, (current_user()['id'],))
+    appts = c.fetchall()
+    conn.close()
+    return render("my_appts", appts=appts, title="My Appointments")
+
+
+if __name__ == "__main__":
+    # for dev only
+    app.run(debug=True, port=5000)
